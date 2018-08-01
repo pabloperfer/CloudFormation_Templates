@@ -1,7 +1,7 @@
 Parameters: 
   ECSClusterName: 
     Type: String
-    Description: Enter the ARN of your ECS cluster
+    Description: Enter the name of your ECS cluster
 
 
 Resources:
