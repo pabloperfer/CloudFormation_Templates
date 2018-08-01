@@ -1,0 +1,151 @@
+Parameters: 
+  ECSClusterName: 
+    Type: String
+    Description: Enter the ARN of your ECS cluster
+
+
+Resources:
+
+
+  StoppedTasksEvent:
+    DependsOn: LambdaFunction
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "EventRule"
+      EventPattern: 
+        source: 
+          - "aws.ecs"
+        detail-type: 
+          - "ECS Task State Change"
+        detail: 
+          clusterArn: 
+            - Fn::Sub: 
+              - 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}' 
+              - {ClusterName: !Ref ECSClusterName }
+
+      State: "ENABLED"
+      Targets: 
+        - Arn:
+           !Sub ${LambdaFunction.Arn}
+          Id: "StoppedTasksEvent"
+
+    
+
+
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: >
+        Lambda function that injects in a specific CloudWatch logs group and stream the ECS task events for a given cluster
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          import time
+          def lambda_handler(event, context):
+            client = boto3.client('logs')
+            LogGroup = os.environ['LogGroup']
+            LogStream = os.environ['LogStream']
+            response = client.describe_log_streams(logGroupName=LogGroup, logStreamNamePrefix=LogStream)
+            token= None
+            print (response)
+            logst = response ['logStreams']
+            log = logst[0]
+    
+            if 'uploadSequenceToken' in log:
+              token = response['logStreams'][0]['uploadSequenceToken']
+              print ("token is" + token)
+              response = client.put_log_events(
+              logGroupName=LogGroup,
+              logStreamName=LogStream,
+              logEvents=[
+                {
+                  'timestamp': int(round(time.time() * 1000)),
+                  'message': "The Task with arn " + event["detail"]["containers"][0]["taskArn"] + " in the container with arn " + event["detail"]["containers"][0]["containerArn"] + " is " + event["detail"]["containers"][0]["lastStatus"]
+                   
+                  },
+                ],
+               sequenceToken=token
+
+               )
+              print (response)
+
+            else :
+              response = client.put_log_events(
+              logGroupName=LogGroup,
+              logStreamName=LogStream,
+              logEvents=[
+                {
+                  'timestamp': int(round(time.time() * 1000)),
+                  'message':"The Task with arn" + event["detail"]["containers"][0]["taskArn"] + " in the container with arn " + event["detail"]["containers"][0]["containerArn"] + " is " + event["detail"]["containers"][0]["lastStatus"]
+                   
+                  },
+                ]
+               )
+              print (response)
+
+   
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !Sub ${LambdaExecutionRole.Arn}
+      Runtime: python3.6
+      Environment: 
+        Variables:
+          LogStream : !Ref MyClusterTasksLogStream
+          LogGroup : !Ref ECSClustersLogGroup
+
+
+
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: 
+        Ref: "LambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !Sub ${StoppedTasksEvent.Arn}
+
+
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsStatement
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:Describe*
+                Resource: arn:aws:logs:*:*:*
+
+
+  ECSClustersLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: ECSClusterTasks
+
+  MyClusterTasksLogStream:
+    Type: AWS::Logs::LogStream
+    Properties: 
+      LogGroupName: !Ref ECSClustersLogGroup
+      LogStreamName: !Ref ECSClusterName
+
+
+
+
