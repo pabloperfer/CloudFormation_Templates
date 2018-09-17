@@ -1,0 +1,312 @@
+Description: Proof of concept of an ECS Service discovery overcoming default bridge network limitation for a task definition where containers need to communicate between them in us-east-1
+
+Parameters:
+
+  MyVpc: 
+    Type: AWS::EC2::VPC::Id
+  Subnet1CidrBlock:
+    Type : String
+    Default : 172.31.90.0/24
+  Subnet2CidrBlock:
+    Type : String
+    Default : 172.31.110.0/24
+  KeyName: 
+    Type: AWS::EC2::KeyPair::KeyName
+  ECSOptimizedAMI:
+    Type: String
+    Default: ami-0254e5972ebcd132c
+
+
+Resources:
+
+
+####We define the subnets within the VPC
+  FirstSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref Subnet1CidrBlock
+      VpcId: !Ref MyVpc
+
+  SecondSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref Subnet2CidrBlock
+      VpcId: !Ref MyVpc
+
+
+###We define an ALB for the ECS Service
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref FirstSubnet
+        - !Ref SecondSubnet
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 10
+      HealthCheckPath: /
+      Name: MyTargetGroup
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref MyVpc
+      TargetType: ip
+
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http 
+      VpcId: !Ref MyVpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+#################We define an ECS cluster and Service
+
+  FlaskECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: MyFlaskECS
+
+  MyFlaskService:
+    DependsOn: ASG
+    Type: AWS::ECS::Service
+    Properties: 
+      Cluster: !Ref FlaskECSCluster
+      DesiredCount: 1
+      HealthCheckGracePeriodSeconds: 120
+      LaunchType: EC2
+      ServiceRegistries:
+        -  RegistryArn: !Sub ${FlaskServiceDiscoveryService1.Arn}
+      LoadBalancers:
+        - TargetGroupArn:
+            !Ref ALBTargetGroup
+          ContainerName: web
+          ContainerPort: 5000
+      ServiceName: MyFlaskService
+      TaskDefinition: !Ref MyFlaskTask
+      NetworkConfiguration:
+        AwsvpcConfiguration: 
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !Ref InstanceSecurityGroup
+          Subnets: 
+            - !Ref FirstSubnet
+            - !Ref SecondSubnet
+
+  MyFlaskService2:
+    DependsOn: ASG
+    Type: AWS::ECS::Service
+    Properties: 
+      Cluster: !Ref FlaskECSCluster
+      DesiredCount: 1
+      LaunchType: EC2
+      ServiceRegistries:
+        -  RegistryArn: !Sub ${FlaskServiceDiscoveryService2.Arn}
+      ServiceName: MyFlaskService2
+      TaskDefinition: !Ref MyFlaskTask2
+      NetworkConfiguration:
+        AwsvpcConfiguration: 
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !Ref InstanceSecurityGroup
+          Subnets: 
+            - !Ref SecondSubnet
+            - !Ref FirstSubnet
+
+##############We define the task definition with the two containers that need to communicate between themselves.
+  
+  MyFlaskTask: 
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - "EC2"
+      ContainerDefinitions: 
+        - 
+          Name: web
+          Image: "training/webapp"
+          Cpu: 1024
+          Memory: 1024
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+      
+  MyFlaskTask2: 
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - "EC2"
+      ContainerDefinitions: 
+        - 
+          Name: "db"
+          Image: "training/postgres"
+          Cpu: 1024
+          Memory: 1024
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5432
+
+##############We define the elements needed for ECS Service Discovery
+
+  FlaskServiceDiscoveryNameSpace1:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+        Description: FlaskServiceDiscovery
+        Vpc: !Ref MyVpc
+        Name: example1.com
+
+  FlaskServiceDiscoveryService1:      
+    Type: "AWS::ServiceDiscovery::Service"
+    Properties:
+      Description: FlaskServiceDiscovery
+      HealthCheckCustomConfig:
+        FailureThreshold: '1'
+      DnsConfig: 
+        DnsRecords: 
+          - Type: A
+            TTL: 300
+        NamespaceId: !Ref FlaskServiceDiscoveryNameSpace1
+
+
+  FlaskServiceDiscoveryService2:      
+    Type: "AWS::ServiceDiscovery::Service"
+    Properties:
+      HealthCheckCustomConfig:
+        FailureThreshold: '1'
+      Description: FlaskServiceDiscovery
+      DnsConfig: 
+        DnsRecords: 
+          - Type: A
+            TTL: 300
+        NamespaceId: !Ref FlaskServiceDiscoveryNameSpace1
+
+
+##############We define the ASG to be registered with the cluster
+   
+  ASLC: 
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties: 
+      KeyName: !Ref KeyName
+      ImageId: !Ref ECSOptimizedAMI
+      UserData: 
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            echo ECS_CLUSTER=${FlaskECSCluster} >> /etc/ecs/ecs.config
+      SecurityGroups: 
+        - !Ref "InstanceSecurityGroup"
+      InstanceType: "m4.xlarge"
+      IamInstanceProfile: !Ref ECSInstanceProfile
+
+
+  ASG: 
+    UpdatePolicy: 
+      AutoScalingRollingUpdate: 
+        MinInstancesInService: "1"
+        MaxBatchSize: "1"
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties: 
+      AvailabilityZones: 
+        - !Sub ${FirstSubnet.AvailabilityZone}
+        - !Sub ${SecondSubnet.AvailabilityZone}
+      LaunchConfigurationName: !Ref "ASLC"
+      MaxSize: "2"
+      MinSize: "1"
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http 
+      VpcId: !Ref MyVpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 1024
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+
+  
+####### We define ECS permissions
+
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2008-10-17"
+        Statement: 
+          - 
+            Effect: Allow
+            Principal: 
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+                - "sts:AssumeRole"
+      Path: "/"
+
+  RolePolicies: 
+    Type: "AWS::IAM::Policy"
+    Properties: 
+      PolicyName: "root"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Action: "ecs:*"
+            Resource: "*"
+          - 
+            Effect: "Allow"
+            Action: "ecr:*"
+            Resource: "*"
+          - 
+            Effect: "Allow"
+            Action: "logs:*"
+            Resource: "*"
+      Roles: 
+        - 
+          !Ref ECSRole
+      
+
+
+  ECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles:
+        - !Ref ECSRole
+      InstanceProfileName: ECSInstanceProfile
+
+
+
+
+
+
