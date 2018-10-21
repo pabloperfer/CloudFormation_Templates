@@ -1,0 +1,164 @@
+Description: Stack that creates a SNS topic and a cross account role to allow a lambda in account B to subscribe to the SNS topic.
+
+
+Parameters: 
+  S3BucketName:
+    Type: String
+    Default: bucketforsharingarn
+    Description: bucket created to share SNS topic in account B 
+  OtherAccountNumber:
+    AllowedPattern: '[0-9]+'
+    Description: The 12 digit AWS account number to grant access to.
+    MaxLength: '12'
+    MinLength: '12'
+    Type: String
+    Default: 227622638325
+
+
+  
+Resources:
+  MySNSTopic: 
+    Type: AWS::SNS::Topic
+ 
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+
+###Bucket policy to allow account B to read the SNS topic ARN as well as the Cross account role ARN to create sns subscription later.
+
+  S3BucketPolicy:
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Action: 
+              - 's3:List*'
+              - 's3:Get*'
+            Effect: Allow
+            Principal:
+              AWS: 
+                - !Sub arn:aws:iam::${OtherAccountNumber}:root
+                - !Sub arn:aws:iam::${OtherAccountNumber}:root
+            Resource: [!Sub "arn:aws:s3:::${S3Bucket}/*", !Sub "arn:aws:s3:::${S3Bucket}"]
+    Type: 'AWS::S3::BucketPolicy'
+
+######Cross account role needed to allow account B to subscribe SNS topic arn and get the arn from the sns topic.
+
+  SNSCrossRole:
+    Properties:
+      RoleName: CustomRoleSNSsubscriptionP
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            AWS: !Sub arn:aws:iam::${OtherAccountNumber}:root
+        Version: 2012-10-17
+      Path: /
+      Policies:
+        -
+          PolicyName: GrantSNSpermissions
+          PolicyDocument:
+            Statement:
+              - Action:
+                  - 'sns:*'
+                Effect: Allow
+                Resource: !Sub "${MySNSTopic}"
+                Sid: Stmt1555870191439
+              - Action:
+                  - 's3:*'
+                Effect: Allow
+                Resource: [!Sub "arn:aws:s3:::${S3Bucket}/*",!Sub "arn:aws:s3:::${S3Bucket}"]
+                Sid: Stmt1555870191432
+            Version: 2012-10-17
+
+    Type: 'AWS::IAM::Role'
+
+
+###############Custom resource that writes role and snstopic arns for other accounts to use them
+
+  PushInfoToS3:
+    Type: Custom::CreateResources
+    Properties: 
+      ServiceToken: !Sub ${LambdaFunction.Arn}
+      SNSArn: !Ref MySNSTopic
+      RoleArn: !Sub ${SNSCrossRole.Arn}
+      BucketName: !Ref S3Bucket
+                
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Runtime: python3.6
+      Description: >
+        Lambda function that pushes arns for the IAM Role and S3 bucket.
+      Handler: index.lambda_handler
+      Role: !Sub ${LambdaExecutionRole.Arn}
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+          def lambda_handler(event, context):
+            if event['RequestType'] == 'Delete':
+              responseData = {}
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+
+            stringSns= event['ResourceProperties']['SNSArn']
+            encoded_stringSns = stringSns.encode("utf-8")
+            stringRole= event['ResourceProperties']['RoleArn']
+            encoded_stringRole = stringRole.encode("utf-8")
+            bucket_name = event['ResourceProperties']['BucketName']
+            file_nameSns = "snsarn.txt"
+            file_nameRole = "rolearn.txt" 
+            s3 = boto3.resource("s3")
+            s3.Bucket(bucket_name).put_object(Key=file_nameSns, Body=encoded_stringSns)
+            s3.Bucket(bucket_name).put_object(Key=file_nameRole, Body=encoded_stringRole)
+            responseData = {}
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsStatement
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:Describe*
+                Resource: arn:aws:logs:*:*:*
+              - Sid: S3
+                Effect: Allow
+                Action:
+                  - s3:PutObject*
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
+
+
+  
+
+
+  
+
+ 
+ 
+ 
+
+
+
+

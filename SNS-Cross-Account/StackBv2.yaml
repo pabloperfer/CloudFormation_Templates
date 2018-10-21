@@ -1,0 +1,185 @@
+Description: Stack that creates a Lambda function and subscribes it to a SNS topic in another account.
+Parameters: 
+  S3BucketName:
+    Type: String
+    Default: bucketforsharingarn
+    Description: bucket created to share SNS topic in account B 
+  SNSTopicAccount:
+    Type: String
+    Default: 759661093277
+
+
+
+Resources: 
+
+####below the lambda function to subscribe
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Runtime: python3.6
+      Description: >
+        Lambda function that pushes arns for the IAM Role and S3 bucket.
+      Handler: index.lambda_handler
+      Role: !Sub ${LambdaExecutionRole.Arn}
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+          import json
+          print('Loading function')
+          def lambda_handler(event, context):
+            #print("Received event: " + json.dumps(event, indent=2))
+            message = event['Records'][0]['Sns']['Message']
+            print("From SNS: " + message)
+            return message
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsStatement
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:Describe*
+                Resource: arn:aws:logs:*:*:*
+
+  LambdaInvokePermission:
+    DependsOn: ReadInfoFromS3
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt
+        - LambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: sns.amazonaws.com
+      SourceArn: !GetAtt ReadInfoFromS3.Id
+
+#######we define the custom resource to read the information about the arns in S3
+  ReadInfoFromS3:
+    Type: Custom::CreateResources
+    Properties: 
+      ServiceToken: !Sub ${LambdaFunctionCustom.Arn}
+      BucketName: !Ref S3BucketName
+      RoleARN: !Sub arn:aws:iam::${SNSTopicAccount}:role/CustomRoleSNSsubscriptionP
+      KeyS: "snsarn.txt"
+      AccountNumber: !Ref SNSTopicAccount
+      DestinyAccount: !Sub ${AWS::AccountId}
+      LambdaFunctionForSubscribe: !Sub ${LambdaFunction.Arn}
+
+  LambdaFunctionCustom:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Runtime: python3.6
+      Description: >
+        Lambda function that pushes arns for the IAM Role and S3 bucket.
+      Handler: index.lambda_handler
+      Role: !Sub ${LambdaExecutionCustomRole.Arn}
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+          import boto3
+          import json
+          import cfnresponse
+            
+          def lambda_handler(event, context):
+            if event['RequestType'] == 'Delete':
+              responseData = {}
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+
+            bucket=event['ResourceProperties']['BucketName']
+            keyS=event['ResourceProperties']['KeyS']
+            SourceAccount= event['ResourceProperties']['AccountNumber']
+            DestAccount= event['ResourceProperties']['DestinyAccount']
+            S3Role = event['ResourceProperties']['RoleARN']
+            LambdaArn = event['ResourceProperties']['LambdaFunctionForSubscribe']
+
+
+            sts_client = boto3.client('sts')
+
+            assumedRoleObject = sts_client.assume_role(RoleArn=S3Role,RoleSessionName="AssumeRoleSession1")
+
+            credentials = assumedRoleObject['Credentials']
+
+            s3 = boto3.resource('s3', aws_access_key_id = credentials['AccessKeyId'], aws_secret_access_key = credentials['SecretAccessKey'],
+            aws_session_token = credentials['SessionToken'],
+            )
+
+            obj = s3.Object(bucket,keyS)
+            S = obj.get()['Body'].read().decode('utf-8')
+
+
+            subscription_client = boto3.client('sns',aws_access_key_id = credentials['AccessKeyId'], aws_secret_access_key = credentials['SecretAccessKey'],
+            aws_session_token = credentials['SessionToken'],)
+
+            response = subscription_client.add_permission(
+               TopicArn=S,
+               Label='lambda_access',
+               AWSAccountId=[DestAccount],
+               ActionName=[
+                'Subscribe',
+                  ]
+               )
+
+            subscription_client2 = boto3.client('sns')
+
+            subscription_client2.subscribe(TopicArn= S,Protocol='lambda',Endpoint= LambdaArn)
+
+            responseData = {'Id':S }
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+
+
+  LambdaExecutionCustomRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsStatement
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:Describe*
+                Resource: arn:aws:logs:*:*:*
+              - Sid: S3
+                Effect: Allow
+                Action:
+                  - s3:PutObject*
+                Resource: !Sub "arn:aws:s3:::${S3BucketName}/*"
+              - Sid: PermitAssumeRole
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: !Sub arn:aws:iam::${SNSTopicAccount}:role/CustomRoleSNSsubscriptionP
+              - Sid: Permitsubscription
+                Effect: Allow
+                Action:
+                  - sns:*
+                Resource: "*"
