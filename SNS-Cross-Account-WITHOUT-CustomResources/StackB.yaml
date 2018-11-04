@@ -1,0 +1,102 @@
+Description: Stack that creates a Lambda function and subscribes it to a SNS topic in another account.
+Parameters: 
+  SNSTopicArn:
+    Type: String
+
+
+Resources: 
+####below the lambda function to subscribe
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Runtime: python3.6
+      Description: >
+        Lambda function that pushes arns for the IAM Role and S3 bucket.
+      Handler: index.lambda_handler
+      Role: !Sub ${LambdaExecutionRole.Arn}
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+          import json
+          print('Loading function')
+          def lambda_handler(event, context):
+            #print("Received event: " + json.dumps(event, indent=2))
+            message = event['Records'][0]['Sns']['Message']
+            print("From SNS: " + message)
+            return message
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsStatement
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:Describe*
+                Resource: arn:aws:logs:*:*:*
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt
+        - LambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SNSTopicArn
+
+  LambdaExecutionCustomRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsStatement
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:Describe*
+                Resource: arn:aws:logs:*:*:*
+              - Sid: Permitsubscription
+                Effect: Allow
+                Action:
+                  - sns:*
+                Resource: "*"
+
+  SnsLambdaSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref 'SNSTopicArn'
+      Protocol: lambda
+      Endpoint: !GetAtt
+        - LambdaFunction
+        - Arn

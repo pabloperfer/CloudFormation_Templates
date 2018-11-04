@@ -1,0 +1,37 @@
+Description: Stack that creates a SNS topic and a cross account role to allow a lambda in account B to subscribe to the SNS topic.
+Parameters: 
+  OtherAccountNumber:
+    AllowedPattern: '[0-9]+'
+    Description: The 12 digit AWS account number to grant access to.
+    MaxLength: '12'
+    MinLength: '12'
+    Type: String
+    Default: 227622638325
+
+Resources:
+  MySNSTopic: 
+    Type: AWS::SNS::Topic
+ 
+######Cross account role needed to allow account B to subscribe SNS topic arn and get the arn from the sns topic.
+
+  mysnspolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+      - !Ref MySNSTopic
+      PolicyDocument:
+        Statement:
+        - Action: 'sns:Publish'
+          Sid : '1'
+          Effect: Allow
+          Resource: !Sub "${MySNSTopic}"
+          Principal:
+            AWS: !Sub arn:aws:iam::${OtherAccountNumber}:root
+        - Action: 'sns:Subscribe'
+          Sid: '2'
+          Effect: Allow
+          Resource: !Sub "${MySNSTopic}"
+          Principal:
+            AWS: !Sub arn:aws:iam::${OtherAccountNumber}:root
+
+    
